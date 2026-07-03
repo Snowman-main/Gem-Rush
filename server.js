@@ -7,6 +7,12 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 
+// WebRTC data channels (UDP): game traffic that never stalls on packet loss.
+// Optional - if the native module is unavailable everything falls back to WebSocket.
+let ndc = null;
+try { ndc = require('node-datachannel'); } catch { console.log('node-datachannel unavailable - WebSocket-only mode'); }
+const STUN = ['stun:stun.l.google.com:19302'];
+
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
@@ -223,6 +229,7 @@ function addPlayer(room, ws, name, color, ability) {
     shieldUntil: 0,
     ghostUntil: 0,
     invulnUntil: 0,
+    dc: null, dcOpen: false,   // WebRTC data channel (UDP game traffic)
     lastInputTs: 0,   // client timestamp of the last processed input (echoed back for reconciliation)
     input: { up: false, down: false, left: false, right: false, fire: false, aim: 0 },
   };
@@ -398,14 +405,16 @@ function tickRoom(room) {
 
   if (room.phase === 'lobby') {
     // party screen doesn't need 30 updates/s - saves CPU/bandwidth on small hosts
+    flushEvents(room);
     room.lobbyBcast = (room.lobbyBcast || 0) + 1;
-    if (room.events.length || room.lobbyBcast % 6 === 0) broadcast(room);
+    if (room.lobbyBcast % 6 === 0) broadcast(room, true);
     return;
   }
 
   if (room.phase === 'ended') {
     if (t >= room.resetAt) endMatchToLobby(room, null);
-    broadcast(room);
+    flushEvents(room);
+    broadcast(room, true);
     return;
   }
 
@@ -534,10 +543,25 @@ function tickRoom(room) {
 
   updateWinCondition(room, t);
 
-  // snapshots at 15Hz keeps the CPU/bandwidth of small free hosts happy;
-  // any tick with events (shots, hits, pickups...) broadcasts immediately
+  // events reliably every tick; snapshots 30Hz over UDP, 15Hz over WS fallback
+  flushEvents(room);
   room.bcastTick = (room.bcastTick || 0) + 1;
-  if (room.events.length || room.bcastTick % 2 === 0) broadcast(room);
+  broadcast(room, room.bcastTick % 2 === 0);
+}
+
+// apply an input packet; guards against stale out-of-order UDP packets
+function applyInput(room, player, msg) {
+  if (Number.isFinite(msg.ts)) {
+    if (msg.ts < player.lastInputTs) return;  // older than what we already have
+    player.lastInputTs = msg.ts;
+  }
+  player.input.up = !!msg.up;
+  player.input.down = !!msg.down;
+  player.input.left = !!msg.left;
+  player.input.right = !!msg.right;
+  player.input.fire = !!msg.fire;
+  player.input.aim = Number(msg.aim) || 0;
+  if (msg.act) activateAbility(room, player, msg, now());
 }
 
 // ---------------- ability activation ----------------
@@ -578,10 +602,23 @@ function activateAbility(room, p, msg, t) {
 }
 
 // ---------------- networking ----------------
-function broadcast(room) {
+// events (shots, hits, deaths, joins...) must never be lost -> always reliable WS
+function flushEvents(room) {
+  if (!room.events.length) return;
+  const msg = JSON.stringify({ t: 'events', events: room.events });
+  room.events = [];
+  for (const p of room.players.values()) {
+    if (p.ws.readyState === 1) p.ws.send(msg);
+  }
+}
+
+// snapshots are disposable: UDP data channel when open (30Hz), WS fallback (15Hz)
+function broadcast(room, includeWsClients) {
   const t = now();
+  room.seq = (room.seq || 0) + 1;
   const msg = JSON.stringify({
     t: 'state',
+    seq: room.seq,
     players: [...room.players.values()].map(p => ({
       id: p.id, name: p.name, color: p.color, ab: p.ability, tm: p.team,
       playing: p.playing,
@@ -610,11 +647,13 @@ function broadcast(room) {
       countdown: room.countdownEnd ? Math.max(0, room.countdownEnd - t) : null,
       resetIn: room.resetAt ? Math.max(0, room.resetAt - t) : null,
     },
-    events: room.events,
   });
-  room.events = [];
   for (const p of room.players.values()) {
-    if (p.ws.readyState === 1) p.ws.send(msg);
+    if (p.dcOpen && p.dc) {
+      try { p.dc.sendMessage(msg); } catch { p.dcOpen = false; }
+    } else if (includeWsClients && p.ws.readyState === 1) {
+      p.ws.send(msg);
+    }
   }
 }
 
@@ -627,6 +666,7 @@ wss.on('connection', (ws) => {
 
   let room = null;
   let player = null;
+  let pc = null;   // WebRTC peer connection for this client
 
   ws.on('message', (raw) => {
     let msg;
@@ -657,14 +697,38 @@ wss.on('connection', (ws) => {
     else if (!player || !room) return;
 
     else if (msg.t === 'input') {
-      player.input.up = !!msg.up;
-      player.input.down = !!msg.down;
-      player.input.left = !!msg.left;
-      player.input.right = !!msg.right;
-      player.input.fire = !!msg.fire;
-      player.input.aim = Number(msg.aim) || 0;
-      if (Number.isFinite(msg.ts)) player.lastInputTs = msg.ts;
-      if (msg.act) activateAbility(room, player, msg, now());
+      applyInput(room, player, msg);
+    }
+    // ---- WebRTC signaling: client offers, we answer; game traffic then flows over UDP ----
+    else if (msg.t === 'rtc-offer' && ndc && !pc) {
+      try {
+        pc = new ndc.PeerConnection('c' + player.id, { iceServers: STUN });
+        pc.onLocalDescription((sdp, type) => {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'rtc-answer', sdp, type }));
+        });
+        pc.onLocalCandidate((candidate, mid) => {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'rtc-ice', candidate, mid }));
+        });
+        const boundPlayer = player, boundRoom = room;
+        pc.onDataChannel((dc) => {
+          boundPlayer.dc = dc;
+          boundPlayer.dcOpen = true;
+          dc.onMessage((data) => {
+            let m;
+            try { m = JSON.parse(data.toString()); } catch { return; }
+            if (m.t === 'ping') { try { dc.sendMessage(JSON.stringify({ t: 'pong', ts: m.ts })); } catch {} }
+            else if (m.t === 'input') applyInput(boundRoom, boundPlayer, m);
+          });
+          dc.onClosed(() => { boundPlayer.dcOpen = false; boundPlayer.dc = null; });
+        });
+        pc.setRemoteDescription(msg.sdp, 'offer');
+      } catch (e) {
+        console.log('rtc setup failed:', e.message);
+        pc = null;
+      }
+    }
+    else if (msg.t === 'rtc-ice' && pc) {
+      try { pc.addRemoteCandidate(msg.candidate, msg.mid); } catch {}
     }
     // ---- party screen actions (lobby phase only) ----
     else if (msg.t === 'profile' && room.phase === 'lobby') {
@@ -708,6 +772,8 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    if (pc) { try { pc.close(); } catch {} pc = null; }
+    if (player) { player.dcOpen = false; player.dc = null; }
     if (room && player) {
       handleMatchLeave(room, player, true);
       room.players.delete(player.id);

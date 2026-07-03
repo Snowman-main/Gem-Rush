@@ -7,6 +7,7 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "node-datachannel": "^0.32.3",
     "ws": "^8.18.0"
   }
 }

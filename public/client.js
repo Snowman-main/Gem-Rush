@@ -194,12 +194,45 @@ function circleHitsWall(x, y, r) {
 function meLatest() { return latest ? latest.players.find(p => p.id === myId) : null; }
 
 // ---------------- networking ----------------
+// WebRTC data channel: UDP-style transport for snapshots + inputs.
+// A lost packet is just dropped (next one is 33ms away) instead of
+// stalling the whole stream like TCP/WebSocket does.
+let pc = null, dc = null, dcOpen = false;
+let lastSeq = 0;
+
+function setupRtc() {
+  try {
+    pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    dc = pc.createDataChannel('game', { ordered: false, maxRetransmits: 0 });
+    dc.onopen = () => { dcOpen = true; };
+    dc.onclose = () => { dcOpen = false; };
+    dc.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
+    pc.onicecandidate = (e) => {
+      if (e.candidate && ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ t: 'rtc-ice', candidate: e.candidate.candidate, mid: e.candidate.sdpMid }));
+      }
+    };
+    pc.createOffer().then((offer) => {
+      pc.setLocalDescription(offer);
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'rtc-offer', sdp: offer.sdp }));
+    });
+  } catch { teardownRtc(); }
+}
+
+function teardownRtc() {
+  dcOpen = false;
+  try { if (dc) dc.close(); } catch {}
+  try { if (pc) pc.close(); } catch {}
+  pc = null; dc = null;
+}
+
 function connect(onOpen) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}`);
   ws.onopen = onOpen;
   ws.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
   ws.onclose = () => {
+    teardownRtc();
     inMatch = false;
     latest = null;
     showScreen('home');
@@ -233,7 +266,9 @@ function handleMessage(msg) {
     $('winGems').textContent = winGems;
     $('partyName').value = myName();
     latest = null;
+    lastSeq = 0;
     showScreen('party');
+    setupRtc();   // negotiate the UDP channel; falls back to WS if it can't connect
   }
   else if (msg.t === 'error') {
     $('lobbyError').textContent = msg.msg;
@@ -245,7 +280,21 @@ function handleMessage(msg) {
     const rtt = performance.now() - msg.ts;
     pingMs = pingMs ? pingMs * 0.7 + rtt * 0.3 : rtt;
   }
+  else if (msg.t === 'rtc-answer') {
+    if (pc) pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).catch(() => {});
+  }
+  else if (msg.t === 'rtc-ice') {
+    if (pc) pc.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.mid }).catch(() => {});
+  }
+  else if (msg.t === 'events') {
+    for (const e of msg.events) {
+      if (inMatch) handleEvent(e);
+      else if (['join', 'leave', 'team', 'mode', 'info', 'leftMatch', 'win'].includes(e.e)) handleEvent(e);
+    }
+  }
   else if (msg.t === 'state') {
+    if (msg.seq && msg.seq <= lastSeq) return;  // stale out-of-order UDP snapshot
+    if (msg.seq) lastSeq = msg.seq;
     const t = performance.now();
     latest = msg;
     roomMode = msg.status.mode;
@@ -304,14 +353,9 @@ function handleMessage(msg) {
       pred.ghostUntil = t + m.gh;
       abilityCdEnd = t + m.abIn;
 
-      for (const e of msg.events) handleEvent(e);
       updateHud(msg);
       showScreen('game');
     } else {
-      // party screen: only feed-style events matter
-      for (const e of msg.events) {
-        if (['join', 'leave', 'team', 'mode', 'info', 'leftMatch', 'win'].includes(e.e)) handleEvent(e);
-      }
       updateParty(msg);
       showScreen('party');
     }
@@ -347,16 +391,27 @@ $('copyCode').onclick = () => copyCodeTo('copyCode');
 $('partyCopy').onclick = () => copyCodeTo('partyCopy');
 
 function sendInput() {
-  if (inMatch && ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ t: 'input', ...input, act: actPending, ts: performance.now() }));
-    actPending = false;
+  if (!inMatch || !ws || ws.readyState !== 1) return;
+  const payload = JSON.stringify({ t: 'input', ...input, act: actPending, ts: performance.now() });
+  if (actPending) {
+    ws.send(payload);   // ability activations must not be lost -> reliable WS
+  } else if (dcOpen && dc.readyState === 'open') {
+    try { dc.send(payload); } catch { ws.send(payload); }
+  } else {
+    ws.send(payload);
   }
+  actPending = false;
 }
 setInterval(sendInput, 33);
 
-// dedicated RTT probe, echoed instantly by the server
+// dedicated RTT probe over the same channel the game traffic uses
 setInterval(() => {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'ping', ts: performance.now() }));
+  const payload = JSON.stringify({ t: 'ping', ts: performance.now() });
+  if (dcOpen && dc.readyState === 'open') {
+    try { dc.send(payload); } catch {}
+  } else if (ws && ws.readyState === 1) {
+    ws.send(payload);
+  }
 }, 1000);
 
 // ---------------- party screen rendering ----------------
@@ -649,7 +704,7 @@ function updateAbilityHud() {
     fpsShown = fpsCount;
     fpsCount = 0;
     const shown = Math.round(pingMs / 5) * 5;  // 5ms steps, updated 1x/s: calm readout
-    $('pingHud').textContent = `${shown}ms · ${fpsShown}fps`;
+    $('pingHud').textContent = `${shown}ms · ${fpsShown}fps · ${dcOpen ? 'UDP' : 'TCP'}`;
     $('pingHud').style.color = (shown > 180 || fpsShown < 30) ? 'var(--red)' : (shown > 90 || fpsShown < 50) ? 'var(--gold)' : '';
   }
   const el = $('abilityHud');
