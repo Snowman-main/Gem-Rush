@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: gem-rush
-    runtime: node
-    plan: free
-    buildCommand: npm install
-    startCommand: node server.js
