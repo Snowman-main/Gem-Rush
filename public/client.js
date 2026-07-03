@@ -240,6 +240,11 @@ function handleMessage(msg) {
     leftOnPurpose = true;
     ws.close();
   }
+  else if (msg.t === 'pong') {
+    // true network RTT, measured outside the game loop
+    const rtt = performance.now() - msg.ts;
+    pingMs = pingMs ? pingMs * 0.7 + rtt * 0.3 : rtt;
+  }
   else if (msg.t === 'state') {
     const t = performance.now();
     latest = msg;
@@ -293,10 +298,6 @@ function handleMessage(msg) {
         } else {
           pred.x += ex * 0.35;                // genuine drift: fold it in gently
           pred.y += ey * 0.35;
-        }
-        if (m.ets) {
-          const raw = Math.max(0, t - m.ets);
-          pingMs = pingMs ? pingMs * 0.85 + raw * 0.15 : raw;  // smoothed, no flicker
         }
       }
       pred.stunUntil = t + m.st;
@@ -352,6 +353,11 @@ function sendInput() {
   }
 }
 setInterval(sendInput, 33);
+
+// dedicated RTT probe, echoed instantly by the server
+setInterval(() => {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'ping', ts: performance.now() }));
+}, 1000);
 
 // ---------------- party screen rendering ----------------
 let partySig = '';
@@ -530,6 +536,7 @@ function pushFeed(div) {
 
 // ---------------- HUD ----------------
 let lastCountdownSec = null;
+let lastSbSig = '';
 
 function makeScoreRow(p) {
   const row = document.createElement('div');
@@ -564,7 +571,12 @@ function updateHud(msg) {
     else you.classList.add('hidden');
   }
 
-  // scoreboard
+  // scoreboard - rebuilding DOM 15-30x/s causes frame stalls that feel like
+  // network lag, so only rebuild when something on it actually changed
+  const sbSig = JSON.stringify(players.map(p => [p.id, p.name, p.gems, p.kills, p.tm, p.color]));
+  if (sbSig === lastSbSig) { updateHudBanners(msg, m, players, teamMode); return; }
+  lastSbSig = sbSig;
+
   const sb = $('scoreboard');
   sb.innerHTML = '';
   if (teamMode) {
@@ -587,7 +599,11 @@ function updateHud(msg) {
     for (const p of sorted) sb.appendChild(makeScoreRow(p));
   }
 
-  // countdown banner
+  updateHudBanners(msg, m, players, teamMode);
+}
+
+// countdown / respawn / win overlay: cheap text updates, run every snapshot
+function updateHudBanners(msg, m, players, teamMode) {
   const cd = $('countdownBanner');
   if (msg.status.countdown != null && msg.status.phase === 'playing') {
     const sec = Math.ceil(msg.status.countdown / 1000);
@@ -624,13 +640,17 @@ function updateHud(msg) {
 
 // ability cooldown pill (updated every frame for smoothness)
 let lastPingShown = 0;
+let fpsCount = 0, fpsShown = 60;
 function updateAbilityHud() {
   const nowMs = performance.now();
+  fpsCount++;
   if (nowMs - lastPingShown > 1000) {
     lastPingShown = nowMs;
+    fpsShown = fpsCount;
+    fpsCount = 0;
     const shown = Math.round(pingMs / 5) * 5;  // 5ms steps, updated 1x/s: calm readout
-    $('pingHud').textContent = `${shown}ms`;
-    $('pingHud').style.color = shown > 180 ? 'var(--red)' : shown > 90 ? 'var(--gold)' : '';
+    $('pingHud').textContent = `${shown}ms · ${fpsShown}fps`;
+    $('pingHud').style.color = (shown > 180 || fpsShown < 30) ? 'var(--red)' : (shown > 90 || fpsShown < 50) ? 'var(--gold)' : '';
   }
   const el = $('abilityHud');
   const def = ABILITY_DEFS[myAbility];

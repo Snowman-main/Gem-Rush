@@ -632,6 +632,12 @@ wss.on('connection', (ws) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
+    // instant echo for true RTT measurement - not tied to the tick loop
+    if (msg.t === 'ping') {
+      if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'pong', ts: msg.ts }));
+      return;
+    }
+
     if (msg.t === 'create' && !player) {
       room = createRoom(msg.mode);
       player = addPlayer(room, ws, msg.name, msg.color, msg.ability);
