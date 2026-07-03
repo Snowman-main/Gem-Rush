@@ -18,7 +18,13 @@ const PLAYER_R = 22;
 const PLAYER_SPEED = 270;
 const KB_DECAY = 5.5;
 const GHOST_SPEED_MULT = 1.25;
-const INTERP_DELAY = 150;   // ms behind live for other players (smooths internet jitter)
+// render other players slightly in the past; auto-sizes to measured network jitter
+let interpDelay = 150;
+const gapHist = [];         // recent snapshot inter-arrival gaps
+
+// cap canvas resolution: full 2x/3x retina fill drops frames on weaker machines,
+// and dropped frames feel exactly like network lag
+const DPR = Math.min(window.devicePixelRatio || 1, 1.5);
 
 const ABILITY_DEFS = {
   dash:   { icon: '⚡', name: 'Dash',   cd: 2500, desc: 'Quick burst of speed. Dodge, chase, escape.' },
@@ -246,8 +252,18 @@ function handleMessage(msg) {
     inMatch = nowInMatch;
 
     if (inMatch) {
+      // measure snapshot jitter and size the interpolation buffer to match:
+      // steady connection -> low delay, spiky connection -> bigger cushion
+      if (snaps.length) {
+        const gap = t - snaps[snaps.length - 1].t;
+        gapHist.push(gap);
+        if (gapHist.length > 40) gapHist.shift();
+        const sorted = [...gapHist].sort((a, b) => a - b);
+        const p90 = sorted[Math.floor(sorted.length * 0.9)] || 66;
+        interpDelay = clamp(p90 * 1.6 + 40, 140, 350);
+      }
       snaps.push({ t, msg });
-      if (snaps.length > 15) snaps.shift();
+      if (snaps.length > 25) snaps.shift();
 
       // adopt authoritative combat state for my player
       if (!pred.init || m.dead) {
@@ -278,7 +294,10 @@ function handleMessage(msg) {
           pred.x += ex * 0.35;                // genuine drift: fold it in gently
           pred.y += ey * 0.35;
         }
-        if (m.ets) pingMs = Math.max(0, Math.round(t - m.ets));
+        if (m.ets) {
+          const raw = Math.max(0, t - m.ets);
+          pingMs = pingMs ? pingMs * 0.85 + raw * 0.15 : raw;  // smoothed, no flicker
+        }
       }
       pred.stunUntil = t + m.st;
       pred.ghostUntil = t + m.gh;
@@ -607,10 +626,11 @@ function updateHud(msg) {
 let lastPingShown = 0;
 function updateAbilityHud() {
   const nowMs = performance.now();
-  if (nowMs - lastPingShown > 500) {
+  if (nowMs - lastPingShown > 1000) {
     lastPingShown = nowMs;
-    $('pingHud').textContent = `${pingMs}ms`;
-    $('pingHud').style.color = pingMs > 180 ? 'var(--red)' : pingMs > 90 ? 'var(--gold)' : '';
+    const shown = Math.round(pingMs / 5) * 5;  // 5ms steps, updated 1x/s: calm readout
+    $('pingHud').textContent = `${shown}ms`;
+    $('pingHud').style.color = shown > 180 ? 'var(--red)' : shown > 90 ? 'var(--gold)' : '';
   }
   const el = $('abilityHud');
   const def = ABILITY_DEFS[myAbility];
@@ -718,7 +738,7 @@ function predictSelf(dt) {
 // ---------------- interpolation (other players + bullets + bombs) ----------------
 function sampleWorld() {
   if (!latest) return null;
-  const rt = performance.now() - INTERP_DELAY;
+  const rt = performance.now() - interpDelay;
 
   let a = null, b = null;
   for (let i = snaps.length - 1; i >= 0; i--) {
@@ -751,8 +771,8 @@ function sampleWorld() {
 
 // ---------------- rendering ----------------
 function resize() {
-  canvas.width = window.innerWidth * devicePixelRatio;
-  canvas.height = window.innerHeight * devicePixelRatio;
+  canvas.width = window.innerWidth * DPR;
+  canvas.height = window.innerHeight * DPR;
 }
 window.addEventListener('resize', resize);
 resize();
@@ -802,7 +822,7 @@ function draw() {
 
   const m = meLatest();
   const W = canvas.width, H = canvas.height;
-  const scale = devicePixelRatio;
+  const scale = DPR;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#120d09';   // the void outside the arena
   ctx.fillRect(0, 0, W, H);

@@ -533,7 +533,11 @@ function tickRoom(room) {
   }
 
   updateWinCondition(room, t);
-  broadcast(room);
+
+  // snapshots at 15Hz keeps the CPU/bandwidth of small free hosts happy;
+  // any tick with events (shots, hits, pickups...) broadcasts immediately
+  room.bcastTick = (room.bcastTick || 0) + 1;
+  if (room.events.length || room.bcastTick % 2 === 0) broadcast(room);
 }
 
 // ---------------- ability activation ----------------
@@ -614,9 +618,13 @@ function broadcast(room) {
   }
 }
 
-const wss = new WebSocketServer({ server });
+// compression off: costs CPU we don't have on small hosts and adds latency
+const wss = new WebSocketServer({ server, perMessageDeflate: false });
 
 wss.on('connection', (ws) => {
+  // TCP_NODELAY: never batch our small, frequent packets (Nagle causes 40-200ms bursts)
+  if (ws._socket && ws._socket.setNoDelay) ws._socket.setNoDelay(true);
+
   let room = null;
   let player = null;
 
