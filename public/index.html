@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gem Rush</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>💎</text></svg>">
+</head>
+<body>
+
+<!-- ===================== HOME ===================== -->
+<div id="home">
+  <div class="lobby-card">
+    <h1 class="logo">GEM RUSH</h1>
+    <p class="tagline">Gems pile up in the mine at the middle of the map.<br>
+    First to sit on <b>10 gems</b> for <b>10 seconds</b> takes the round.<br>
+    Get shot and you drop the lot.</p>
+
+    <label for="nameInput">NAME</label>
+    <input id="nameInput" maxlength="14" placeholder="what do they call you?" autocomplete="off">
+
+    <div class="lobby-buttons">
+      <button id="createBtn" class="btn btn-primary">CREATE PARTY</button>
+      <div class="join-row">
+        <input id="codeInput" maxlength="4" placeholder="CODE" autocomplete="off">
+        <button id="joinBtn" class="btn btn-secondary">JOIN</button>
+      </div>
+    </div>
+
+    <p id="lobbyError" class="error"></p>
+
+    <div class="how-to">
+      <b>WASD</b> move &nbsp;·&nbsp; <b>mouse</b> aim &nbsp;·&nbsp; <b>click</b> shoot &nbsp;·&nbsp; <b>right click / F</b> ability<br>
+      Hits knock people back and stun them — chain shots for combos.
+    </div>
+  </div>
+</div>
+
+<!-- ===================== PARTY SCREEN ===================== -->
+<div id="party" class="hidden">
+  <div class="lobby-card party-card">
+    <div class="party-head">
+      <h1 class="logo logo-small">GEM RUSH</h1>
+      <div class="party-code">ROOM <span id="partyCode">----</span> <button id="partyCopy" title="Copy invite code">⧉</button></div>
+    </div>
+
+    <div id="partyBanner" class="party-banner hidden"></div>
+
+    <div class="party-cols">
+      <div class="party-col">
+        <label>PARTY <span class="label-hint" id="rosterHint"></span></label>
+        <div id="partyRoster"></div>
+
+        <label>MODE <span class="label-hint" id="modeHint">— host only</span></label>
+        <div id="modeRow"></div>
+      </div>
+
+      <div class="party-col">
+        <label for="partyName">YOUR NAME</label>
+        <input id="partyName" maxlength="14" autocomplete="off">
+
+        <label>YOUR COLOR <span class="label-hint">— free-for-all only</span></label>
+        <div id="colorRow"></div>
+
+        <label>YOUR ABILITY <span class="label-hint">— right click or F</span></label>
+        <div id="abilityRow"></div>
+      </div>
+    </div>
+
+    <div class="lobby-buttons">
+      <button id="startBtn" class="btn btn-primary hidden">START GAME</button>
+      <div id="waitingMsg" class="waiting-msg hidden">Waiting for the host to start the game…</div>
+      <button id="leavePartyBtn" class="btn btn-ghost">LEAVE PARTY</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== GAME ===================== -->
+<div id="game" class="hidden">
+  <canvas id="canvas"></canvas>
+
+  <div id="hud">
+    <div id="roomBadge">
+      ROOM <span id="roomCode">----</span> <button id="copyCode" title="Copy invite code">⧉</button>
+      <button id="leaveBtn" title="Leave the match (game keeps going for the others)">↩ LEAVE</button>
+    </div>
+    <div id="scoreboard"></div>
+    <div id="killFeed"></div>
+    <div id="gemHud"><span id="myGems">0</span> / <span id="winGems">10</span> 💎 <span id="gemYou" class="hidden"></span></div>
+    <div id="abilityHud">⚡ READY</div>
+    <div id="countdownBanner" class="hidden"></div>
+    <div id="respawnBanner" class="hidden"></div>
+    <div id="winOverlay" class="hidden">
+      <div class="win-text" id="winText"></div>
+      <div class="win-sub" id="winSub"></div>
+    </div>
+  </div>
+</div>
+
+<script src="client.js"></script>
+</body>
+</html>
