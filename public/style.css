@@ -270,6 +270,8 @@ input:focus { border-color: var(--gold); }
 }
 #leaveBtn:hover { color: var(--red); border-color: var(--red); }
 
+#pingHud { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; margin-left: 8px; }
+
 #scoreboard {
   position: absolute; top: 12px; right: 12px;
   background: var(--panel);

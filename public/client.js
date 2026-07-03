@@ -18,7 +18,7 @@ const PLAYER_R = 22;
 const PLAYER_SPEED = 270;
 const KB_DECAY = 5.5;
 const GHOST_SPEED_MULT = 1.25;
-const INTERP_DELAY = 120;   // ms behind live for other players (smooths jitter)
+const INTERP_DELAY = 150;   // ms behind live for other players (smooths internet jitter)
 
 const ABILITY_DEFS = {
   dash:   { icon: '⚡', name: 'Dash',   cd: 2500, desc: 'Quick burst of speed. Dodge, chase, escape.' },
@@ -52,7 +52,8 @@ let latest = null;        // newest state msg
 
 // local prediction of my own player
 const pred = { x: 0, y: 0, kvx: 0, kvy: 0, stunUntil: 0, ghostUntil: 0, init: false };
-let serverPos = null;     // last authoritative position of me
+const predHist = [];      // {ts, x, y} - where we predicted ourselves at each frame
+let pingMs = 0;           // round-trip estimate from the input timestamp echo
 let actPending = false;   // ability keypress waiting to be sent
 let abilityCdEnd = 0;     // perfNow when my ability is ready (from server)
 
@@ -204,6 +205,7 @@ function connect(onOpen) {
 function enterMatchReset() {
   snaps = [];
   pred.init = false;
+  predHist.length = 0;
   particles = [];
   dmgTexts = [];
   bulletTrails.clear();
@@ -252,12 +254,34 @@ function handleMessage(msg) {
         pred.x = m.x; pred.y = m.y;
         pred.kvx = 0; pred.kvy = 0;
         pred.init = true;
+        predHist.length = 0;
       } else {
         pred.kvx = m.kvx; pred.kvy = m.kvy;   // knockback/dash comes from the server
+
+        // reconciliation: compare the server position against where WE thought
+        // we were at the moment of the last input the server processed (m.ets).
+        // this makes prediction latency-proof - no rubber-banding at high ping.
+        let hx = pred.x, hy = pred.y;
+        if (m.ets && predHist.length) {
+          let h = predHist[predHist.length - 1];
+          for (let i = 0; i < predHist.length; i++) {
+            if (predHist[i].ts >= m.ets) { h = predHist[i]; break; }
+          }
+          hx = h.x; hy = h.y;
+          while (predHist.length && predHist[0].ts < m.ets - 60) predHist.shift();
+        }
+        const ex = m.x - hx, ey = m.y - hy;
+        if (Math.hypot(ex, ey) > 200) {
+          pred.x = m.x; pred.y = m.y;         // way off (teleport/lag spike): snap
+          predHist.length = 0;
+        } else {
+          pred.x += ex * 0.35;                // genuine drift: fold it in gently
+          pred.y += ey * 0.35;
+        }
+        if (m.ets) pingMs = Math.max(0, Math.round(t - m.ets));
       }
       pred.stunUntil = t + m.st;
       pred.ghostUntil = t + m.gh;
-      serverPos = { x: m.x, y: m.y };
       abilityCdEnd = t + m.abIn;
 
       for (const e of msg.events) handleEvent(e);
@@ -304,7 +328,7 @@ $('partyCopy').onclick = () => copyCodeTo('partyCopy');
 
 function sendInput() {
   if (inMatch && ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ t: 'input', ...input, act: actPending }));
+    ws.send(JSON.stringify({ t: 'input', ...input, act: actPending, ts: performance.now() }));
     actPending = false;
   }
 }
@@ -580,7 +604,14 @@ function updateHud(msg) {
 }
 
 // ability cooldown pill (updated every frame for smoothness)
+let lastPingShown = 0;
 function updateAbilityHud() {
+  const nowMs = performance.now();
+  if (nowMs - lastPingShown > 500) {
+    lastPingShown = nowMs;
+    $('pingHud').textContent = `${pingMs}ms`;
+    $('pingHud').style.color = pingMs > 180 ? 'var(--red)' : pingMs > 90 ? 'var(--gold)' : '';
+  }
   const el = $('abilityHud');
   const def = ABILITY_DEFS[myAbility];
   const left = abilityCdEnd - performance.now();
@@ -679,12 +710,9 @@ function predictSelf(dt) {
   const ny = clamp(pred.y + (ivy + pred.kvy) * dt, PLAYER_R, world.h - PLAYER_R);
   if (!circleHitsWall(pred.x, ny, PLAYER_R)) pred.y = ny; else pred.kvy = 0;
 
-  // gently pull toward the authoritative server position
-  if (serverPos) {
-    const ex = serverPos.x - pred.x, ey = serverPos.y - pred.y;
-    if (Math.hypot(ex, ey) > 150) { pred.x = serverPos.x; pred.y = serverPos.y; }
-    else { const k = Math.min(1, dt * 5); pred.x += ex * k; pred.y += ey * k; }
-  }
+  // remember where we predicted ourselves for later reconciliation
+  predHist.push({ ts: nowMs, x: pred.x, y: pred.y });
+  if (predHist.length > 300) predHist.shift();
 }
 
 // ---------------- interpolation (other players + bullets + bombs) ----------------

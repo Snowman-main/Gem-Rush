@@ -162,7 +162,7 @@ function spawnGem(room, x, y) {
     gx = clamp(gx + (Math.random() - 0.5) * 120, GEM_R + 10, WORLD.w - GEM_R - 10);
     gy = clamp(gy + (Math.random() - 0.5) * 120, GEM_R + 10, WORLD.h - GEM_R - 10);
   }
-  room.gems.push({ id: nextId++, x: gx, y: gy });
+  room.gems.push({ id: nextId++, x: Math.round(gx), y: Math.round(gy) });
 }
 
 function spawnGemInMine(room) {
@@ -223,6 +223,7 @@ function addPlayer(room, ws, name, color, ability) {
     shieldUntil: 0,
     ghostUntil: 0,
     invulnUntil: 0,
+    lastInputTs: 0,   // client timestamp of the last processed input (echoed back for reconciliation)
     input: { up: false, down: false, left: false, right: false, fire: false, aim: 0 },
   };
   room.players.set(player.id, player);
@@ -396,7 +397,9 @@ function tickRoom(room) {
   const dt = TICK_MS / 1000;
 
   if (room.phase === 'lobby') {
-    broadcast(room);
+    // party screen doesn't need 30 updates/s - saves CPU/bandwidth on small hosts
+    room.lobbyBcast = (room.lobbyBcast || 0) + 1;
+    if (room.events.length || room.lobbyBcast % 6 === 0) broadcast(room);
     return;
   }
 
@@ -587,6 +590,7 @@ function broadcast(room) {
       sh: Math.max(0, p.shieldUntil - t),                     // ability shield ms remaining
       gh: Math.max(0, p.ghostUntil - t),                      // ghost ms remaining
       abIn: Math.max(0, p.abilityReadyAt - t),                // ability cooldown remaining
+      ets: p.lastInputTs,                                     // input timestamp echo (reconciliation)
     })),
     bullets: room.bullets.map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y), color: b.color })),
     bombs: room.bombs.map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y), fuse: Math.max(0, b.explodeAt - t) })),
@@ -645,6 +649,7 @@ wss.on('connection', (ws) => {
       player.input.right = !!msg.right;
       player.input.fire = !!msg.fire;
       player.input.aim = Number(msg.aim) || 0;
+      if (Number.isFinite(msg.ts)) player.lastInputTs = msg.ts;
       if (msg.act) activateAbility(room, player, msg, now());
     }
     // ---- party screen actions (lobby phase only) ----
