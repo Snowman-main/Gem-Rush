@@ -230,6 +230,7 @@ function addPlayer(room, ws, name, color, ability) {
     ghostUntil: 0,
     invulnUntil: 0,
     dc: null, dcOpen: false,   // WebRTC data channel (UDP game traffic)
+    lastActSeq: 0,    // last ability activation processed (dedupe across channels)
     lastInputTs: 0,   // client timestamp of the last processed input (echoed back for reconciliation)
     input: { up: false, down: false, left: false, right: false, fire: false, aim: 0 },
   };
@@ -551,6 +552,13 @@ function tickRoom(room) {
 
 // apply an input packet; guards against stale out-of-order UDP packets
 function applyInput(room, player, msg) {
+  // ability activations are checked BEFORE the staleness guard: they ride
+  // several packets on both channels and are deduped by sequence number,
+  // so a slow reliable channel can never make them "stale"
+  if (msg.act && Number(msg.act) > player.lastActSeq) {
+    player.lastActSeq = Number(msg.act);
+    activateAbility(room, player, msg, now());
+  }
   if (Number.isFinite(msg.ts)) {
     if (msg.ts < player.lastInputTs) return;  // older than what we already have
     player.lastInputTs = msg.ts;
@@ -561,7 +569,6 @@ function applyInput(room, player, msg) {
   player.input.right = !!msg.right;
   player.input.fire = !!msg.fire;
   player.input.aim = Number(msg.aim) || 0;
-  if (msg.act) activateAbility(room, player, msg, now());
 }
 
 // ---------------- ability activation ----------------

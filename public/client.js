@@ -60,7 +60,8 @@ let latest = null;        // newest state msg
 const pred = { x: 0, y: 0, kvx: 0, kvy: 0, stunUntil: 0, ghostUntil: 0, init: false };
 const predHist = [];      // {ts, x, y} - where we predicted ourselves at each frame
 let pingMs = 0;           // round-trip estimate from the input timestamp echo
-let actPending = false;   // ability keypress waiting to be sent
+let actSeq = 0;           // ability activation counter (server dedupes by this)
+let actAnnounceUntil = 0; // keep repeating the activation in every packet until this time
 let abilityCdEnd = 0;     // perfNow when my ability is ready (from server)
 
 let particles = [];
@@ -392,15 +393,13 @@ $('partyCopy').onclick = () => copyCodeTo('partyCopy');
 
 function sendInput() {
   if (!inMatch || !ws || ws.readyState !== 1) return;
-  const payload = JSON.stringify({ t: 'input', ...input, act: actPending, ts: performance.now() });
-  if (actPending) {
-    ws.send(payload);   // ability activations must not be lost -> reliable WS
-  } else if (dcOpen && dc.readyState === 'open') {
-    try { dc.send(payload); } catch { ws.send(payload); }
-  } else {
-    ws.send(payload);
-  }
-  actPending = false;
+  // while an activation is fresh, stamp it on every packet over BOTH channels;
+  // the server dedupes by sequence number, so whichever copy lands first wins
+  const act = performance.now() < actAnnounceUntil ? actSeq : 0;
+  const payload = JSON.stringify({ t: 'input', ...input, act, ts: performance.now() });
+  const dcReady = dcOpen && dc.readyState === 'open';
+  if (dcReady) { try { dc.send(payload); } catch {} }
+  if (!dcReady || act) ws.send(payload);
 }
 setInterval(sendInput, 33);
 
@@ -735,7 +734,8 @@ function tryAbility() {
   // movement abilities can't break a stun (matches server rules)
   if ((myAbility === 'dash' || myAbility === 'ghost') && nowMs < pred.stunUntil) return;
 
-  actPending = true;
+  actSeq++;
+  actAnnounceUntil = nowMs + 250;
   abilityCdEnd = nowMs + ABILITY_DEFS[myAbility].cd;
 
   // predict the dash locally so it feels instant
